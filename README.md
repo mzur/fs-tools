@@ -22,5 +22,5 @@ Both tools return a `(N more, use offset X)` hint when results are truncated.
 
 ```sh
 npm install
-claude mcp add --scope user fs-tools node /home/m/.claude/fs-tools/index.js
+claude mcp add --scope user fs-tools node /path/to/fs-tools/index.js
 ```
