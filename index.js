@@ -2,7 +2,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { readdirSync } from "fs";
+import { readdirSync, realpathSync } from "fs";
 import { join, resolve, basename } from "path";
 import { homedir } from "os";
 
@@ -12,6 +12,16 @@ const server = new Server(
 );
 
 const expandPath = (p) => resolve(p.replace(/^~/, homedir()));
+
+const resolveUnderCwd = (p = ".") => {
+  // realpath follows symlinks, so a link inside cwd pointing outside is caught
+  const cwd = realpathSync(process.cwd());
+  const abs = realpathSync(resolve(cwd, p));
+  if (abs !== cwd && !abs.startsWith(cwd + "/")) {
+    throw new Error(`Path escapes current working directory: ${p}`);
+  }
+  return abs;
+};
 
 const globToRegex = (pattern) => {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
@@ -65,6 +75,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         required: ["path", "pattern"]
       }
+    },
+    {
+      name: "ListDirectoryCurrent",
+      description: "List files under the current working directory (or a relative subdirectory of it), optionally recursive",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Subdirectory relative to the current working directory (default '.')" },
+          recursive: { type: "boolean", description: "Recurse into subdirectories" },
+          maxResults: { type: "number", description: "Maximum number of entries to return (default 100)" },
+          offset: { type: "number", description: "Number of entries to skip (for pagination)" }
+        }
+      }
+    },
+    {
+      name: "FindFilesCurrent",
+      description: "Find files under the current working directory (or a relative subdirectory of it) whose name matches a glob pattern (e.g. *.yaml, *config*)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Subdirectory relative to the current working directory (default '.')" },
+          pattern: { type: "string", description: "Glob pattern matched against the filename (not the full path)" },
+          maxResults: { type: "number", description: "Maximum number of results to return (default 100)" },
+          offset: { type: "number", description: "Number of results to skip (for pagination)" }
+        },
+        required: ["pattern"]
+      }
     }
   ]
 }));
@@ -99,6 +136,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { path: dirPath, pattern, maxResults, offset } = args;
     try {
       const absPath = expandPath(dirPath);
+      const re = globToRegex(pattern);
+      const matches = walkAll(absPath).filter(f => re.test(basename(f)));
+      const { sliced, suffix } = paginate(matches, offset, maxResults);
+      return toolResult(sliced.join("\n") + suffix || "(no matches)");
+    } catch (e) {
+      return errResult(e.message);
+    }
+  }
+
+  if (name === "ListDirectoryCurrent") {
+    const { path: dirPath, recursive = false, maxResults, offset } = args;
+    try {
+      const absPath = resolveUnderCwd(dirPath);
+      const entries = walk(absPath, recursive);
+      const { sliced, suffix } = paginate(entries, offset, maxResults);
+      return toolResult(sliced.join("\n") + suffix || "(empty)");
+    } catch (e) {
+      return errResult(e.message);
+    }
+  }
+
+  if (name === "FindFilesCurrent") {
+    const { path: dirPath, pattern, maxResults, offset } = args;
+    try {
+      const absPath = resolveUnderCwd(dirPath);
       const re = globToRegex(pattern);
       const matches = walkAll(absPath).filter(f => re.test(basename(f)));
       const { sliced, suffix } = paginate(matches, offset, maxResults);
